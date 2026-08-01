@@ -2,7 +2,7 @@
 ## Overview of MHGRL
 ![Overview of MHRGL](model_arch.jpg)
 ## Requirements
-The code has been tested running under Python 3.10.4. The required packages are as follows:
+The code has been tested running under Python 3.13.7. The required packages are as follows:
 * torch: 2.0.1+cu118
 * torch_geometric: 2.3.1
 * dill: 0.3.7
@@ -90,6 +90,20 @@ TASK=knn ACTION=test \
   RESUME_PATH=res/mimic4/knn/pytorch_prediction.bin \
   bash run_mimic4.sh
 ```
+
+On Windows PowerShell, use the native wrapper from the repository root:
+
+```powershell
+.\code\run_mimic4.ps1 -Task knn -Action train
+.\code\run_mimic4.ps1 -Task knn -Action test `
+  -ResumePath "res\mimic4\knn\pytorch_prediction.bin"
+```
+
+The preprocessing default excludes `NEWBORN` admissions and admissions with a
+recorded `deathtime`, then selects the six most frequent eligible primary ICD-9
+diagnoses. This is an adapted MIMIC-IV v3.1 baseline: the paper names its six
+MIMIC-IV cohorts but does not release the exact MIMIC-IV preprocessing/code
+mapping needed to reconstruct Table 1.
 
 See [REPRODUCE_MIMIC4.md](REPRODUCE_MIMIC4.md) for the exact filters,
 paper hyperparameters, audit files, and every change from upstream.

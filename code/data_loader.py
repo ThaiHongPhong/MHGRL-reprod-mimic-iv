@@ -218,13 +218,15 @@ class EHRPairData(Data):
         self.right_edge_type = right_edge_type
         self.y = y
 
-    def __inc__(self, key, value):
-        if key == 'edge_index_left':
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == "edge_index_left":
             return self.x_left.size(0)
-        if key == 'edge_index_right':
+        if key == "edge_index_right":
             return self.x_right.size(0)
-        else:
-            return super(EHRPairData, self).__inc__(key, value)
+
+        return super(EHRPairData, self).__inc__(
+            key, value, *args, **kwargs
+        )
 
 
 # construct all the kg relations from the kg relations file

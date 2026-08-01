@@ -210,8 +210,11 @@ def main():
     log_dir = os.path.join(args.output_dir, 'logs', args.task)
     os.makedirs(log_dir, exist_ok=True)
 
-    fh = logging.FileHandler(os.path.join(
-        log_dir, get_time_string()+'.txt'), encoding='utf8')
+    log_filename = get_time_string().replace(":", "-") + ".txt"
+    fh = logging.FileHandler(
+        os.path.join(log_dir, log_filename),
+        encoding="utf8"
+)
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 

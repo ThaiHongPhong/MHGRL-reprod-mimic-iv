@@ -6,7 +6,7 @@ paper/repository representation:
 
 * one graph per hospital admission;
 * diagnosis, ICD procedure, and medication nodes;
-* the six most frequent disease cohorts;
+* the six most frequent eligible primary ICD-9 diagnosis cohorts;
 * a 60/20/20 split and five positive/five negative training pairs;
 * PMI relations fitted on the selected cohort, as in data_process.ipynb.
 
@@ -24,6 +24,7 @@ import math
 import pickle
 import random
 import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
@@ -82,11 +83,50 @@ def parse_args() -> argparse.Namespace:
         help="Released MHGRL NDC-to-RxNorm mapping.",
     )
     parser.add_argument("--min-code-count", type=int, default=50)
-    parser.add_argument("--num-cohorts", type=int, default=6)
+    parser.add_argument(
+        "--cohort-mode",
+        choices=["most-frequent"],
+        default="most-frequent",
+        help="Select the most frequent eligible primary ICD-9 diagnoses (default).",
+    )
+    parser.add_argument(
+        "--cohort-codes",
+        nargs="+",
+        default=None,
+        help="Optional explicit ICD-9 primary-diagnosis codes; overrides --cohort-mode.",
+    )
+    parser.add_argument(
+        "--num-cohorts",
+        type=int,
+        default=6,
+        help="Number of cohorts used only with --cohort-mode most-frequent.",
+    )
+    parser.add_argument(
+        "--exclude-newborn",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Exclude NEWBORN admissions (default: enabled).",
+    )
+    parser.add_argument(
+        "--exclude-in-hospital-deaths",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Exclude admissions with a recorded deathtime (default: enabled).",
+    )
     parser.add_argument("--positive-per-anchor", type=int, default=5)
     parser.add_argument("--negative-per-anchor", type=int, default=5)
     parser.add_argument("--seed", type=int, default=1002)
     return parser.parse_args()
+
+
+def progress(step: int, total: int, message: str, started: float | None = None) -> float:
+    """Print an immediately visible preprocessing progress message."""
+    now = time.perf_counter()
+    if started is None:
+        print(f"[{step}/{total}] {message}...", flush=True)
+    else:
+        print(f"[{step}/{total}] {message} ({now - started:.1f}s)", flush=True)
+    return now
 
 
 def find_table(hosp_dir: Path, stem: str, required: bool = True) -> Path | None:
@@ -320,12 +360,29 @@ def disease_titles(hosp_dir: Path) -> dict[str, str]:
 
 
 def preprocess(args: argparse.Namespace) -> dict[str, object]:
+    cohort_mode = getattr(args, "cohort_mode", "most-frequent")
+    cohort_codes_arg = getattr(args, "cohort_codes", None)
+    exclude_newborn = getattr(args, "exclude_newborn", True)
+    exclude_deaths = getattr(args, "exclude_in_hospital_deaths", True)
+
     if args.min_code_count < 1:
         raise ValueError("--min-code-count must be at least 1")
     if args.num_cohorts < 2:
         raise ValueError("--num-cohorts must be at least 2")
+    if cohort_codes_arg:
+        requested_cohort_codes = [normalize_code(code) for code in cohort_codes_arg]
+        if any(code is None for code in requested_cohort_codes):
+            raise ValueError("--cohort-codes contains an empty or invalid code")
+        if len(set(requested_cohort_codes)) != len(requested_cohort_codes):
+            raise ValueError("--cohort-codes must not contain duplicates")
+        effective_cohort_mode = "explicit"
+    else:
+        requested_cohort_codes = None
+        effective_cohort_mode = "most-frequent"
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    total_steps = 12
+    step_started = progress(1, total_steps, "Loading NDC-to-RxNorm mapping")
     ndc_to_rxnorm = load_ndc_to_rxnorm(args.ndc_rxnorm_map)
     # Keep the exact mapping beside the generated relations so training cannot
     # accidentally use a different mapping from preprocessing.
@@ -333,17 +390,26 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
         "w", encoding="utf-8"
     ) as handle:
         handle.write(repr(ndc_to_rxnorm))
+    progress(1, total_steps, f"Loaded {len(ndc_to_rxnorm):,} NDC mappings", step_started)
 
+    step_started = progress(2, total_steps, "Loading admissions.csv(.gz)")
     admissions = read_table(args.hosp_dir, "admissions", REQUIRED_TABLES["admissions"])
+    progress(2, total_steps, f"Loaded {len(admissions):,} admission rows", step_started)
+    step_started = progress(3, total_steps, "Loading diagnoses_icd.csv(.gz)")
     diagnoses = read_table(
         args.hosp_dir, "diagnoses_icd", REQUIRED_TABLES["diagnoses_icd"]
     )
+    progress(3, total_steps, f"Loaded {len(diagnoses):,} diagnosis rows", step_started)
+    step_started = progress(4, total_steps, "Loading procedures_icd.csv(.gz)")
     procedures = read_table(
         args.hosp_dir, "procedures_icd", REQUIRED_TABLES["procedures_icd"]
     )
+    progress(4, total_steps, f"Loaded {len(procedures):,} procedure rows", step_started)
+    step_started = progress(5, total_steps, "Loading prescriptions.csv(.gz)")
     prescriptions = read_table(
         args.hosp_dir, "prescriptions", REQUIRED_TABLES["prescriptions"]
     )
+    progress(5, total_steps, f"Loaded {len(prescriptions):,} prescription rows", step_started)
 
     raw_counts = {
         "admissions": len(admissions),
@@ -352,9 +418,15 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
         "prescriptions": len(prescriptions),
     }
 
-    admissions["deathtime"] = pd.to_datetime(admissions["deathtime"], errors="coerce")
-    newborn = admissions["admission_type"].astype("string").str.upper().eq("NEWBORN")
-    eligible_admissions = admissions[newborn.fillna(False).eq(False) & admissions["deathtime"].isna()]
+    step_started = progress(6, total_steps, "Applying admission and ICD-9 filters")
+    admission_mask = pd.Series(True, index=admissions.index)
+    if exclude_newborn:
+        newborn = admissions["admission_type"].astype("string").str.upper().eq("NEWBORN")
+        admission_mask &= newborn.fillna(False).eq(False)
+    if exclude_deaths:
+        deaths = pd.to_datetime(admissions["deathtime"], errors="coerce").notna()
+        admission_mask &= ~deaths
+    eligible_admissions = admissions[admission_mask]
     eligible_ids = set(eligible_admissions["hadm_id"])
 
     diagnoses["icd_version"] = pd.to_numeric(diagnoses["icd_version"], errors="coerce")
@@ -367,14 +439,18 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
     procedures = procedures.dropna(subset=["icd_code", "hadm_id", "subject_id"])
     diagnoses = diagnoses[diagnoses["hadm_id"].isin(eligible_ids)]
     procedures = procedures[procedures["hadm_id"].isin(eligible_ids)]
+    progress(6, total_steps, f"Retained {len(eligible_ids):,} eligible admissions", step_started)
 
+    step_started = progress(7, total_steps, "Mapping medication NDC codes to RxNorm")
     prescriptions["ndc"] = prescriptions["ndc"].map(normalize_ndc)
     prescriptions = prescriptions.dropna(subset=["ndc", "hadm_id", "subject_id"])
     prescriptions = prescriptions[prescriptions["hadm_id"].isin(eligible_ids)]
     mapped_medication_rows = int(prescriptions["ndc"].isin(ndc_to_rxnorm).sum())
     prescriptions = prescriptions[prescriptions["ndc"].isin(ndc_to_rxnorm)].copy()
     prescriptions["rxnorm"] = prescriptions["ndc"].map(ndc_to_rxnorm)
+    progress(7, total_steps, f"Mapped {mapped_medication_rows:,} medication rows", step_started)
 
+    step_started = progress(8, total_steps, "Filtering infrequent medical codes")
     diagnoses, diag_codes = filter_frequent_codes(
         diagnoses, "icd_code", args.min_code_count
     )
@@ -384,7 +460,14 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
     prescriptions, ndc_codes = filter_frequent_codes(
         prescriptions, "ndc", args.min_code_count
     )
+    progress(
+        8,
+        total_steps,
+        f"Retained {len(diag_codes):,} diagnosis, {len(procedure_codes):,} procedure, and {len(ndc_codes):,} NDC codes",
+        step_started,
+    )
 
+    step_started = progress(9, total_steps, "Aggregating modalities into admission-level EHRs")
     diagnoses = diagnoses.sort_values(["subject_id", "hadm_id", "seq_num"])
     procedures = procedures.sort_values(["subject_id", "hadm_id", "seq_num"])
     diag_by_admission = aggregate_modality(diagnoses, ["icd_code"]).rename(
@@ -400,20 +483,39 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
     common = diag_by_admission.merge(
         procedure_by_admission, on=["subject_id", "hadm_id"], how="inner"
     ).merge(medication_by_admission, on=["subject_id", "hadm_id"], how="inner")
+    progress(9, total_steps, f"Constructed {len(common):,} complete admission-level EHRs", step_started)
 
+    step_started = progress(10, total_steps, "Selecting single-visit disease cohorts")
     visit_counts = common.groupby("subject_id")["hadm_id"].nunique()
     single_visit_subjects = set(visit_counts[visit_counts == 1].index)
     cohort = common[common["subject_id"].isin(single_visit_subjects)].copy()
     cohort["disease"] = cohort["ICD9_DIAG"].str.split(",").str[0]
-    selected_diseases = list(cohort["disease"].value_counts().head(args.num_cohorts).index)
-    if len(selected_diseases) < args.num_cohorts:
-        raise ValueError(
-            f"Only {len(selected_diseases)} disease cohorts survived preprocessing; "
-            f"{args.num_cohorts} were requested."
-        )
+    primary_counts = cohort["disease"].value_counts()
+    if requested_cohort_codes is None:
+        selected_diseases = list(primary_counts.head(args.num_cohorts).index)
+        if len(selected_diseases) < args.num_cohorts:
+            raise ValueError(
+                f"Only {len(selected_diseases)} disease cohorts survived preprocessing; "
+                f"{args.num_cohorts} were requested."
+            )
+    else:
+        selected_diseases = list(requested_cohort_codes)
+        missing_cohorts = [code for code in selected_diseases if primary_counts.get(code, 0) == 0]
+        if missing_cohorts:
+            raise ValueError(
+                "Requested primary-diagnosis cohorts have no eligible EHRs after "
+                f"filtering: {missing_cohorts}. Check the MIMIC version and filters."
+            )
     cohort = cohort[cohort["disease"].isin(selected_diseases)].copy()
     cohort = cohort.rename(columns={"subject_id": "SUBJECT_ID", "hadm_id": "HADM_ID"})
+    progress(
+        10,
+        total_steps,
+        f"Selected {len(selected_diseases)} cohorts with {len(cohort):,} EHRs",
+        step_started,
+    )
 
+    step_started = progress(11, total_steps, "Splitting data and constructing pair labels")
     train, valid, test = split_admissions(cohort, args.seed)
     validate_split_support(
         train, valid, test, selected_diseases, args.positive_per_anchor
@@ -447,7 +549,9 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
         args.negative_per_anchor,
         args.seed + 2,
     )
+    progress(11, total_steps, "Created train/validation/test splits and pair labels", step_started)
 
+    step_started = progress(12, total_steps, "Building vocabulary, PMI relations, and audit reports")
     all_selected = pd.concat([train, valid, test], ignore_index=True)
     vocabulary = {
         "diag_codes": sorted(
@@ -500,14 +604,18 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
         "parameters": {
             "min_code_count": args.min_code_count,
             "num_cohorts": args.num_cohorts,
+            "cohort_mode": effective_cohort_mode,
+            "cohort_codes": selected_diseases,
             "positive_per_anchor": args.positive_per_anchor,
             "negative_per_anchor": args.negative_per_anchor,
             "seed": args.seed,
             "icd_version": 9,
+            "exclude_newborn": exclude_newborn,
+            "exclude_in_hospital_deaths": exclude_deaths,
             "split": [0.6, 0.2, 0.2],
         },
         "raw_rows": raw_counts,
-        "eligible_admissions_after_newborn_and_death_filter": len(eligible_ids),
+        "eligible_admissions_after_optional_filters": len(eligible_ids),
         "mapped_medication_rows": mapped_medication_rows,
         "frequent_code_counts": {
             "diagnosis": len(diag_codes),
@@ -521,6 +629,9 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
             ].nunique()
         ),
         "selected_diseases": selected_diseases,
+        "cohort_counts": {
+            code: int((cohort["disease"] == code).sum()) for code in selected_diseases
+        },
         "split_sizes": {"train": len(train), "valid": len(valid), "test": len(test)},
         "pair_counts": {
             "train_positive": train_pos,
@@ -533,6 +644,7 @@ def preprocess(args: argparse.Namespace) -> dict[str, object]:
     }
     with (args.output_dir / "preprocessing_report.json").open("w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
+    progress(12, total_steps, "Finished writing MHGRL artifacts", step_started)
     return report
 
 
