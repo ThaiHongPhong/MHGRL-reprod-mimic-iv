@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+# MIMIC source/derived data must not be committed or redistributed.
+data/mimic3/
+data/mimic4/
+
+# Generated graph caches, checkpoints, logs, and figures.
+code/preprocess_data/
+code/res/

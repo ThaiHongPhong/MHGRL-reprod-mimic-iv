@@ -1,0 +1,59 @@
+{
+  "parameters": {
+    "min_code_count": 50,
+    "num_cohorts": 6,
+    "positive_per_anchor": 5,
+    "negative_per_anchor": 5,
+    "seed": 1002,
+    "icd_version": 9,
+    "split": [
+      0.6,
+      0.2,
+      0.2
+    ]
+  },
+  "raw_rows": {
+    "admissions": 546028,
+    "diagnoses": 6364488,
+    "procedures": 859655,
+    "prescriptions": 20292611
+  },
+  "eligible_admissions_after_newborn_and_death_filter": 534238,
+  "mapped_medication_rows": 11329911,
+  "frequent_code_counts": {
+    "diagnosis": 2825,
+    "procedure": 753,
+    "ndc": 2111
+  },
+  "common_admissions": 147567,
+  "single_visit_admissions": 53552,
+  "selected_diseases": [
+    "41401",
+    "41071",
+    "5409",
+    "4241",
+    "64511",
+    "0389"
+  ],
+  "split_sizes": {
+    "train": 3768,
+    "valid": 1256,
+    "test": 1257
+  },
+  "pair_counts": {
+    "train_positive": 18840,
+    "train_negative": 18840,
+    "valid_positive": 6280,
+    "valid_negative": 6280
+  },
+  "relation_counts_before_loader_pmi_gt_1": {
+    "diag_proce_rel.csv": 40774,
+    "diag_pres_rel.csv": 278069,
+    "proce_pres_rel.csv": 58917
+  },
+  "vocabulary_sizes": {
+    "diag_codes": 1981,
+    "proce_codes": 399,
+    "atc_codes": 1412
+  }
+}
