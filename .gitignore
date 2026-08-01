@@ -9,4 +9,3 @@ code/res/
 
 **/pytorch_prediction.bin
 mhgrl-mimic4-test-*.txt
-**/mhgrl-mimic4-test-*.txt
